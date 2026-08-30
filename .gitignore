@@ -1,0 +1,70 @@
+# ── Python ────────────────────────
+__pycache__/
+.pytest_cache/
+node_modules/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+.env
+*.env.local
+
+# ── Java ──────────────────────────
+target/
+*.class
+*.jar
+*.war
+*.ear
+.idea/
+*.iml
+.settings/
+.project
+.classpath
+
+# ── Go ────────────────────────────
+golang/vendor/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# ── IDE ───────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Docker ────────────────────────
+docker-compose.override.yml
+
+# ── Data & Uploads ────────────────
+uploads/*
+!uploads/央国企采购制度示例.txt
+*.sqlite
+*.db
+data/
+
+# ── Logs ──────────────────────────
+*.log
+logs/
+
+# ── Secrets (永远不要提交) ────────
+*.pem
+*.key
+credentials.json
+secrets.yaml
+.env
+.env.*
+!.env.example
