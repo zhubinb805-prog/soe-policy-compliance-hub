@@ -51,7 +51,12 @@
               <span class="message-role-label">{{ message.role === 'user' ? '用户' : '助手' }}</span>
               <span class="message-time">{{ formatTime(message.timestamp) }}</span>
             </div>
-            <div class="message-text">{{ message.content }}</div>
+            <div
+              v-if="message.role === 'assistant'"
+              class="message-text markdown-body"
+              v-html="renderMarkdown(message.content)"
+            />
+            <div v-else class="message-text">{{ message.content }}</div>
           </div>
         </div>
 
@@ -97,7 +102,7 @@
       v-model:visible="showResult"
       width="800px"
     >
-      <p class="answer-text">{{ qaResult?.answer }}</p>
+      <div class="answer-text markdown-body" v-html="renderMarkdown(qaResult?.answer || '')" />
       <el-tag v-if="qaResult?.confidence != null" type="info" size="small" class="meta-tag">
         置信度: {{ (qaResult.confidence * 100).toFixed(1) }}%
       </el-tag>
@@ -162,6 +167,87 @@ const messages = ref([])
 const currentSessionId = ref('')
 const conversationList = ref([])
 const messageListRef = ref(null)
+
+// Render the model's Markdown without trusting arbitrary HTML from the model.
+// Escaping happens before the small Markdown subset is converted to HTML.
+const escapeHtml = (value) => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;')
+
+const renderInlineMarkdown = (value) => value
+  .replace(/`([^`]+)`/g, '<code>$1</code>')
+  .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+  .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+
+const renderMarkdown = (value) => {
+  if (!value) return ''
+
+  // Some providers return escaped newline characters instead of real newlines.
+  const source = String(value)
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\r\n?/g, '\n')
+    // Make inline headings/lists readable even when the model omitted a newline.
+    .replace(/[ \t]+(?=#{1,6}\s)/g, '\n')
+    .replace(/[ \t]+(?=(?:[-*])\s+\*\*)/g, '\n')
+    .replace(/[ \t]+(?=\d+\.\s+)/g, '\n')
+
+  const lines = escapeHtml(source).split('\n')
+  const html = []
+  let listType = null
+
+  const closeList = () => {
+    if (listType) {
+      html.push(`</${listType}>`)
+      listType = null
+    }
+  }
+
+  lines.forEach((line) => {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      closeList()
+      return
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/)
+    if (heading) {
+      closeList()
+      const level = heading[1].length
+      html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`)
+      return
+    }
+
+    const unordered = trimmed.match(/^[-*]\s+(.+)$/)
+    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/)
+    if (unordered || ordered) {
+      const nextType = ordered ? 'ol' : 'ul'
+      if (listType !== nextType) {
+        closeList()
+        listType = nextType
+        html.push(`<${listType}>`)
+      }
+      html.push(`<li>${renderInlineMarkdown((unordered || ordered)[1])}</li>`)
+      return
+    }
+
+    if (trimmed.startsWith('&gt;')) {
+      closeList()
+      html.push(`<blockquote>${renderInlineMarkdown(trimmed.slice(4).trim())}</blockquote>`)
+      return
+    }
+
+    closeList()
+    html.push(`<p>${renderInlineMarkdown(trimmed)}</p>`)
+  })
+
+  closeList()
+  return html.join('')
+}
 
 const generateSessionId = () => {
   return `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
@@ -419,6 +505,59 @@ onMounted(() => {
   line-height: 1.6;
 }
 
+.message-text.markdown-body {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.markdown-body :deep(p) {
+  margin: 0 0 10px;
+}
+
+.markdown-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4),
+.markdown-body :deep(h5),
+.markdown-body :deep(h6) {
+  margin: 2px 0 8px;
+  color: var(--el-text-color-primary);
+  line-height: 1.45;
+}
+
+.markdown-body :deep(h3) {
+  font-size: 15px;
+}
+
+.markdown-body :deep(ul),
+.markdown-body :deep(ol) {
+  margin: 4px 0 10px;
+  padding-left: 22px;
+}
+
+.markdown-body :deep(li) {
+  margin: 4px 0;
+}
+
+.markdown-body :deep(blockquote) {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--el-color-primary);
+  background: var(--el-fill-color-lighter);
+  color: var(--el-text-color-secondary);
+}
+
+.markdown-body :deep(code) {
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: var(--el-fill-color-dark);
+  font-family: Consolas, monospace;
+}
+
 .loading-indicator {
   display: flex;
   flex-direction: column;
@@ -444,6 +583,11 @@ onMounted(() => {
   font-size: 15px;
   line-height: 1.8;
   margin-bottom: 12px;
+}
+
+.answer-text.markdown-body {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .meta-tag {

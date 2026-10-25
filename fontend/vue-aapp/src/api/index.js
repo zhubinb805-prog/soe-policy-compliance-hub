@@ -3,7 +3,7 @@ import { useAuth } from '../composables/useAuth'
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 60000,
+  timeout: 120000,
   headers: {
     'Content-Type': 'application/json'
   }
@@ -41,7 +41,8 @@ export const uploadDocument = (file) => {
   const formData = new FormData()
   formData.append('file', file)
   return api.post('/ingest/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' }
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 300000
   })
 }
 
@@ -51,7 +52,8 @@ export const uploadBatch = (files) => {
     formData.append('files', file)
   })
   return api.post('/ingest/batch', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' }
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 600000
   })
 }
 

@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -23,6 +24,11 @@ from langchain_openai import ChatOpenAI
 
 from config import settings
 from services.memory_models import MemoryEvent, Personality, UserProfile
+
+RELATION_TYPES = (
+    "contains_clause", "governed_by", "applies_to", "owned_by", "requires",
+    "mitigates", "conflicts_with", "supersedes", "related_to", "part_of",
+)
 
 
 class QueryIntent(str, Enum):
@@ -92,7 +98,7 @@ ANSWER_PROMPT = """\
 4. 如果涉及多个信息源，综合分析后给出结论
 5. 优先输出：结论、适用范围/责任部门、制度版本与生效时间、风险提示、原文依据（文件名+页码或条款）
 6. 明确区分“制度明确规定”和“基于材料的推断”；材料不足时不要臆测
-7. 保持专业、准确、简洁
+7. 保持专业、准确、简洁；必须使用 Markdown 分段输出：标题、段落和每条列表项独占一行，标题或列表前后适当留空行，禁止把整份回答合并成一段。
 """
 
 MEMORY_ANSWER_PROMPT = """\
@@ -251,7 +257,10 @@ class QAAgent:
             SystemMessage(content=INTENT_PROMPT),
             HumanMessage(content=question),
         ]
-        resp = await self.llm.ainvoke(messages)
+        try:
+            resp = await asyncio.wait_for(self.llm.ainvoke(messages), timeout=20)
+        except Exception:
+            return QueryIntent.FACTOID
         raw = resp.content.strip().lower()
         for intent in QueryIntent:
             if intent.value in raw:
@@ -266,7 +275,10 @@ class QAAgent:
             SystemMessage(content=QUERY_REWRITE_PROMPT),
             HumanMessage(content=question),
         ]
-        resp = await self.llm.ainvoke(messages)
+        try:
+            resp = await asyncio.wait_for(self.llm.ainvoke(messages), timeout=20)
+        except Exception:
+            return {"queries": [question], "entities": [], "keywords": []}
         try:
             cleaned = resp.content.strip()
             if cleaned.startswith("```"):
@@ -306,7 +318,10 @@ class QAAgent:
             SystemMessage(content=CYPHER_GENERATION_PROMPT),
             HumanMessage(content=f"问题: {question}\n实体: {entities}"),
         ]
-        resp = await self.llm.ainvoke(messages)
+        try:
+            resp = await asyncio.wait_for(self.llm.ainvoke(messages), timeout=20)
+        except Exception:
+            return []
         try:
             cleaned = resp.content.strip()
             if cleaned.startswith("```"):
@@ -317,6 +332,7 @@ class QAAgent:
 
         contexts: list[RetrievedContext] = []
         for cypher in cypher_data.get("queries", []):
+            cypher = self._normalize_relationship_types(cypher)
             if not self._is_read_only_cypher(cypher):
                 continue
             try:
@@ -338,6 +354,18 @@ class QAAgent:
         """Reject model-generated Cypher that can mutate data or call procedures."""
         forbidden = r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD\s+CSV|CALL|FOREACH)\b"
         return bool(cypher.strip()) and re.search(forbidden, cypher, flags=re.IGNORECASE) is None
+
+    @staticmethod
+    def _normalize_relationship_types(cypher: str) -> str:
+        """Neo4j stores relation types in uppercase; normalize model output."""
+        normalized = str(cypher)
+        for relation in RELATION_TYPES:
+            normalized = re.sub(
+                rf"(?i)(:\s*){re.escape(relation)}\b",
+                rf"\1{relation.upper()}",
+                normalized,
+            )
+        return normalized
 
     # ── hybrid reranking ─────────────────────────────────────
 
@@ -409,9 +437,23 @@ class QAAgent:
         messages = [
             SystemMessage(content=formatted_prompt),
         ]
-        resp = await self.llm.ainvoke(messages)
+        try:
+            resp = await asyncio.wait_for(self.llm.ainvoke(messages), timeout=30)
+            answer = resp.content
+        except Exception:
+            # Keep the workflow useful when the chat model is unavailable: the
+            # retrieved source excerpts are still safer than an invented answer.
+            if contexts:
+                excerpts = [
+                    f"- {context.content[:500]} [来源: {context.source}]"
+                    for context in contexts[:5]
+                ]
+                answer = "模型暂时不可用，以下是检索到的制度原文片段：\n\n" + "\n".join(excerpts)
+            else:
+                answer = "暂未检索到相关制度内容，请确认文件已入库后再提问。"
+            reasoning_steps.append("模型超时，已返回检索原文片段")
         reasoning_steps.append("答案生成完成")
-        return resp.content, reasoning_steps
+        return answer, reasoning_steps
 
     @staticmethod
     def _build_style_instructions(personality: Personality) -> str:

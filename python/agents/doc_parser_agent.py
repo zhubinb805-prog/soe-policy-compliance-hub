@@ -65,6 +65,7 @@ class DocParserAgent:
         ".txt": DocType.TEXT,
         ".md": DocType.MARKDOWN,
         ".docx": DocType.TEXT,
+        ".doc": DocType.TEXT,
     }
 
     CHUNK_SIZE = 512
@@ -255,15 +256,34 @@ class DocParserAgent:
 
     @staticmethod
     def _parse_text(file_path: str) -> list[str]:
-        if file_path.lower().endswith(".docx"):
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in {".docx", ".doc"}:
             try:
                 from docx import Document
+                if ext == ".doc":
+                    raise ValueError("legacy .doc format is not supported by python-docx")
                 doc = Document(file_path)
-                return ["\n".join(p.text for p in doc.paragraphs if p.text.strip())]
+                paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+                # Word files often store the useful content in tables.
+                for table in doc.tables:
+                    for row in table.rows:
+                        cells = [cell.text.strip() for cell in row.cells]
+                        if any(cells):
+                            paragraphs.append(" | ".join(cells))
+                return ["\n".join(paragraphs)] or ["[Empty Word document]"]
             except Exception:
+                if ext == ".doc":
+                    return ["[Legacy .doc is not supported; save it as .docx and upload again]"]
                 return [f"[Word 文档解析失败] {file_path}"]
-        with open(file_path, encoding="utf-8") as f:
-            return [f.read()]
+
+        # Enterprise policy files are frequently GBK/GB18030 encoded.
+        raw = open(file_path, "rb").read()
+        for encoding in ("utf-8-sig", "utf-8", "gb18030", "utf-16"):
+            try:
+                return [raw.decode(encoding)]
+            except UnicodeDecodeError:
+                continue
+        return [raw.decode("utf-8", errors="replace")]
 
     # ── chunking ─────────────────────────────────────────────
 

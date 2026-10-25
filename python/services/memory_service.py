@@ -126,20 +126,8 @@ class MemoryService:
         
         text_to_embed = f"{event.user_input} {event.agent_response} {event.summary}"
         if text_to_embed.strip():
-            from langchain_openai import OpenAIEmbeddings
-            
-            if "dashscope" in settings.openai_base_url.lower():
-                from .vector_store import DashScopeEmbeddings
-                embedder = DashScopeEmbeddings(
-                    api_key=settings.openai_api_key,
-                    model=settings.embedding_model,
-                )
-            else:
-                embedder = OpenAIEmbeddings(
-                    model=settings.embedding_model,
-                    api_key=settings.openai_api_key,
-                    base_url=settings.openai_base_url,
-                )
+            from .vector_store import create_embeddings
+            embedder = create_embeddings()
             event.embedding = await embedder.aembed_query(text_to_embed.strip())
         
         conn = sqlite3.connect(self.db_path)
@@ -164,23 +152,11 @@ class MemoryService:
     async def retrieve_long_term(self, query: str, top_k: int = 5) -> List[MemoryEvent]:
         """检索长期记忆（根据用户的问题，找到相关的历史记忆）"""
         if not query.strip():
-            query_embedding = [0.0] * 1536
+            from .vector_store import create_embeddings
+            query_embedding = await create_embeddings().aembed_query(" ")
         else:
-            from langchain_openai import OpenAIEmbeddings
-            
-            if "dashscope" in settings.openai_base_url.lower():
-                from .vector_store import DashScopeEmbeddings
-                embedder = DashScopeEmbeddings(
-                    api_key=settings.openai_api_key,
-                    model=settings.embedding_model,
-                )
-            else:
-                embedder = OpenAIEmbeddings(
-                    model=settings.embedding_model,
-                    api_key=settings.openai_api_key,
-                    base_url=settings.openai_base_url,
-                )
-            query_embedding = await embedder.aembed_query(query.strip())
+            from .vector_store import create_embeddings
+            query_embedding = await create_embeddings().aembed_query(query.strip())
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
@@ -203,7 +179,10 @@ class MemoryService:
             try:
                 embedding = pickle.loads(row[7]) if row[7] else [0.0] * 1536
             except:
-                embedding = [0.0] * 1536
+                continue
+
+            if len(embedding) != len(query_embedding):
+                continue
             
             similarity = np.dot(query_embedding, embedding) / (
                 np.linalg.norm(query_embedding) * np.linalg.norm(embedding) + 1e-8

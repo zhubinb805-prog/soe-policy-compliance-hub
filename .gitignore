@@ -59,6 +59,7 @@ data/
 # ── Logs ──────────────────────────
 *.log
 logs/
+runtime-logs/
 
 # ── Secrets (永远不要提交) ────────
 *.pem

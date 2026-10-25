@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     openai_model: str = "gpt-4o"
     embedding_model: str = "text-embedding-3-small"
+    embedding_provider: str = "local"  # local | openai | dashscope
+    local_embedding_model: str = "BAAI/bge-small-zh-v1.5"
+    local_embedding_cache: str = "D:/AIModels/fastembed"
 
     # Memory System (v6.0)
     memory_db_path: str = "./memory.db"

@@ -13,10 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_openai import OpenAIEmbeddings
-
 from agents.doc_parser_agent import DocType, DocumentChunk
 from config import settings
+from .vector_store import create_embeddings
 
 
 @dataclass
@@ -44,11 +43,7 @@ class MultimodalService:
     }
 
     def __init__(self) -> None:
-        self.embeddings = OpenAIEmbeddings(
-            model=settings.embedding_model,
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-        )
+        self.embeddings = create_embeddings()
 
     async def embed_chunks(self, chunks: list[DocumentChunk]) -> list[list[float]]:
         """批量嵌入文档块"""

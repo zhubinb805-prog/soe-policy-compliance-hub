@@ -20,8 +20,9 @@
 ```text
 制度文件
   -> DocParserAgent：PDF / DOCX / 表格 / 图片解析和分块
-  -> KnowledgeExtractAgent：条款、部门、风险、控制关系抽取
-  -> ChromaDB + Neo4j：非结构化内容与结构化关系双存储
+  -> ChromaDB：先写入可检索的文档向量
+  -> KnowledgeExtractAgent：尝试抽取条款、部门、风险、控制关系
+  -> Neo4j：写入结构化关系；模型暂时不可用时不阻塞向量检索
   -> QAAgent：查询改写、向量/图谱检索、重排、引用式回答
   -> KnowledgeUpdateAgent：变更检测、版本更新、失效知识清理
 ```
@@ -51,7 +52,7 @@
 | `DocParserAgent` | 文档解析Agent | 把PDF/图片/表格等各种格式的文档"读懂"，切割成小段落 | 超强秘书，能看懂任何格式的文件 |
 | `KnowledgeExtractAgent` | 知识抽取Agent | 从文本中自动提取人名、公司、关系等结构化信息 | 分析师，把信息整理成知识图谱 |
 | `QAAgent` | 问答Agent | 接收用户问题，同时查向量库和知识图谱，生成精准答案 | 专家顾问，综合多源信息回答 |
-| `KnowledgeUpdateAgent` | 知识更新Agent | 监听文档变更，只更新变化的部分，保持知识库最新 | 勤快管理员，实时维护知识库 |
+| `KnowledgeUpdateAgent` | 知识更新Agent | 响应手动更新、Watchdog 或 Kafka 变更事件，只更新变化的部分 | 勤快管理员，维护知识库版本 |
 
 ### 五大技术亮点
 
@@ -120,15 +121,17 @@
   └── 切割成小块（Chunk）
      │
      ▼
-知识抽取Agent
+ChromaDB 向量入库（先完成，保证文档可检索）
+     │
+     ▼
+知识抽取Agent（模型超时时降级，不影响向量入库）
   ├── 命名实体识别（NER）：找出人名、公司名、地名等
   ├── 关系抽取：找出实体之间的关系
   └── 生成三元组：("张三", "就职于", "腾讯")
      │
-     ├──────────────────────────────┐
-     ▼                              ▼
-存入向量数据库                   存入知识图谱
-(ChromaDB/PGVector)              (Neo4j)
+     │
+     ▼
+存入知识图谱（Neo4j）
 ```
 
 **流水线2：智能问答**（用户提问时触发）
@@ -157,6 +160,8 @@
 ```
 
 **流水线3：增量更新**（文档修改时触发）
+
+当前 API 默认通过 `/api/admin/update` 手动触发；Watchdog 和 Kafka 消费方法已实现，但不会随 API 进程自动启动，部署时需要单独启动对应 worker。
 
 ```
 文档被修改 / 数据库记录更新
@@ -239,7 +244,7 @@ CDC事件产生（通过文件监听或Kafka）
 - Docker Desktop；
 - PyCharm 及 Python 3.11；
 - Node.js 18+（推荐 LTS 版本）；
-- 同时支持对话模型和嵌入模型的 OpenAI 兼容 API。
+- 一个可用的对话模型 API；嵌入可以使用远程 API，也可以按上面的配置使用本地模型。
 
 ### 1. 用 PyCharm 打开项目
 
@@ -291,6 +296,16 @@ EMBEDDING_MODEL=text-embedding-v3
 ```
 
 `OPENAI_MODEL` 用于问答和知识抽取，`EMBEDDING_MODEL` 用于将制度文档转换为检索向量。模型名称必须是当前 API 平台实际支持的名称。不要将包含真实密钥的 `python/.env` 上传到 GitHub 或发给他人。
+
+如果当前 API 平台没有开放嵌入模型，可使用项目内置的本地 FastEmbed/ONNX 向量模型。聊天仍使用 `OPENAI_MODEL`，文档向量化和问题检索在本地完成：
+
+```env
+EMBEDDING_PROVIDER=local
+LOCAL_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+LOCAL_EMBEDDING_CACHE=D:/AIModels/fastembed
+```
+
+首次运行会将约 100MB 的中文模型下载到 D 盘。该模型输出 512 维向量，适合制度、采购、合同和合规材料；切换本地模型后，项目会使用独立的 `knowledge_chunks_local_bge` Chroma 集合。
 
 其余数据库地址保持 `.env.example` 中的 `localhost` 默认值即可，因为本流程在 Windows 本机运行 API。
 

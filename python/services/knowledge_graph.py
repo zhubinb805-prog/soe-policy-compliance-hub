@@ -148,12 +148,25 @@ class KnowledgeGraphService:
 
     async def delete_by_source(self, source: str) -> int:
         """按来源删除所有实体和关系（增量更新时先删再建）"""
+        from pathlib import Path
+
+        raw = str(source)
+        sources = {raw, raw.replace("\\", "/"), raw.replace("/", "\\")}
+        try:
+            normalized = str(Path(raw))
+            sources.add(normalized)
+            if not Path(raw).is_absolute():
+                sources.add(f"./{normalized}")
+            sources.add(str(Path(raw).resolve()))
+        except OSError:
+            pass
         cypher = """
-        MATCH (e:Entity {source: $source})
+        MATCH (e:Entity)
+        WHERE e.source IN $sources
         DETACH DELETE e
         RETURN count(e) AS deleted
         """
-        records = await self.execute_cypher(cypher, {"source": source})
+        records = await self.execute_cypher(cypher, {"sources": list(sources)})
         return records[0].get("deleted", 0) if records else 0
 
     # ── stats ────────────────────────────────────────────────

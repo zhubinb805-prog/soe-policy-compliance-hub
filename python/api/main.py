@@ -178,17 +178,20 @@ async def upload_document(file: UploadFile = File(...)):
     safe_name = os.path.basename(original_name)
     allowed_extensions = set(DocParserAgent.SUPPORTED_EXTENSIONS)
     if safe_name != original_name or Path(safe_name).suffix.lower() not in allowed_extensions:
-        raise HTTPException(status_code=400, detail="仅支持 PDF、DOCX、TXT、MD、CSV、XLSX 和图片文件")
+        raise HTTPException(status_code=400, detail="仅支持 PDF、DOC、DOCX、TXT、MD、CSV、XLS、XLSX 和图片文件")
     save_path = os.path.join(settings.upload_dir, safe_name)    # 上传文件保存路径
     with open(save_path, "wb") as f:
         shutil.copyfileobj(file.file, f)    # 复制文件内容到保存路径
+    doc_id = doc_parser._make_doc_id(save_path)
 
     try:
         ingest_wf = workflows.get("ingest")
         if not ingest_wf:
             raise HTTPException(status_code=503, detail="Ingest workflow not initialized")
 
-        thread_id = f"ingest-{safe_name}"
+        # Use an isolated checkpoint for every upload; reusing a filename can
+        # restore stale LangGraph state and report zero chunks.
+        thread_id = f"ingest-{uuid.uuid4()}"
         request_id = str(uuid.uuid4())
         config = {"configurable": {"thread_id": thread_id}}
 
@@ -211,6 +214,14 @@ async def upload_document(file: UploadFile = File(...)):
             status="success",
         )
     except Exception as e:
+        # A failed workflow must not leave an unindexed file in the document list.
+        try:
+            await vector_store.delete_by_doc_id(doc_id)
+            await knowledge_graph.delete_by_source(save_path)
+            if os.path.exists(save_path):
+                os.remove(save_path)
+        except Exception as cleanup_error:
+            logger.warning(f"清理失败上传文件时发生错误: {cleanup_error}")
         logger.error(f"上传失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"上传失败: {str(e)}")
 
@@ -234,12 +245,17 @@ async def get_documents():
             filepath = os.path.join(settings.upload_dir, filename)
             if os.path.isfile(filepath):
                 stat = os.stat(filepath)
+                doc_id = doc_parser._make_doc_id(filepath)
+                if hasattr(vector_store, "count_by_source"):
+                    chunks_count = await vector_store.count_by_source(filepath)
+                else:
+                    chunks_count = await vector_store.count_by_doc_id(doc_id)
                 documents.append({
                     "id": filename,
                     "name": filename,
                     "size": stat.st_size,
                     "upload_time": stat.st_ctime,
-                    "chunks_count": 0
+                    "chunks_count": chunks_count,
                 })
     return documents
 
@@ -256,7 +272,10 @@ async def delete_document(file_name: str):
     
     try:
         doc_id = doc_parser._make_doc_id(filepath)
-        await vector_store.delete_by_doc_id(doc_id)
+        if hasattr(vector_store, "delete_by_source"):
+            await vector_store.delete_by_source(filepath)
+        else:
+            await vector_store.delete_by_doc_id(doc_id)
         await knowledge_graph.delete_by_source(filepath)
         os.remove(filepath)
         return {"success": True, "message": f"Document {safe_name} and its knowledge records were deleted"}

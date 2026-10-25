@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from typing import Any
 
 from langchain_openai import OpenAIEmbeddings
@@ -53,24 +55,82 @@ class DashScopeEmbeddings:
         return (await self.aembed_documents([text]))[0]
 
 
+class LocalFastEmbedEmbeddings:
+    """使用 FastEmbed/ONNX 在本地生成向量，不调用远程 embeddings API。"""
+
+    def __init__(self, model_name: str, cache_dir: str):
+        self.model_name = model_name
+        self.cache_dir = cache_dir
+        self._model: Any = None
+        self._lock = threading.Lock()
+
+    def _get_model(self) -> Any:
+        if self._model is None:
+            with self._lock:
+                if self._model is None:
+                    from fastembed import TextEmbedding
+
+                    self._model = TextEmbedding(
+                        model_name=self.model_name,
+                        cache_dir=self.cache_dir,
+                    )
+        return self._model
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        model = self._get_model()
+        return [vector.tolist() for vector in model.embed(texts)]
+
+    async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        return await asyncio.to_thread(self._embed, texts)
+
+    async def aembed_query(self, text: str) -> list[float]:
+        vectors = await self.aembed_documents([text])
+        return vectors[0]
+
+
+_EMBEDDINGS_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def create_embeddings() -> Any:
+    """Create the configured embedding provider, reusing local model instances."""
+    provider = settings.embedding_provider.lower().strip()
+    if provider == "local":
+        key = (provider, settings.local_embedding_model)
+        if key not in _EMBEDDINGS_CACHE:
+            _EMBEDDINGS_CACHE[key] = LocalFastEmbedEmbeddings(
+                model_name=settings.local_embedding_model,
+                cache_dir=settings.local_embedding_cache,
+            )
+        return _EMBEDDINGS_CACHE[key]
+    if provider == "dashscope" or "dashscope" in settings.openai_base_url.lower():
+        return DashScopeEmbeddings(
+            api_key=settings.openai_api_key,
+            model=settings.embedding_model,
+        )
+    return OpenAIEmbeddings(
+        model=settings.embedding_model,
+        api_key=settings.openai_api_key,
+        base_url=settings.openai_base_url,
+    )
+
+
 class VectorStoreService:
     """向量库统一接口，底层可切换 ChromaDB / PGVector"""
 
     COLLECTION_NAME = "knowledge_chunks"
 
     def __init__(self) -> None:
-        # 根据 base_url 判断是否使用 DashScope
-        if "dashscope" in settings.openai_base_url.lower():
-            self.embeddings = DashScopeEmbeddings(
-                api_key=settings.openai_api_key,
-                model=settings.embedding_model,
-            )
+        provider = settings.embedding_provider.lower().strip()
+        if provider == "local":
+            self.embeddings = create_embeddings()
+            # Keep local vectors separate from any old remote-embedding collection.
+            self.collection_name = "knowledge_chunks_local_bge"
+        elif provider == "dashscope" or "dashscope" in settings.openai_base_url.lower():
+            self.embeddings = create_embeddings()
+            self.collection_name = self.COLLECTION_NAME
         else:
-            self.embeddings = OpenAIEmbeddings(
-                model=settings.embedding_model,
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-            )
+            self.embeddings = create_embeddings()
+            self.collection_name = self.COLLECTION_NAME
         self._store: Any = None
         self._backend = settings.vector_store_type
 
@@ -86,7 +146,7 @@ class VectorStoreService:
         import chromadb
         client = chromadb.HttpClient(host=settings.chroma_host, port=settings.chroma_port)
         self._store = client.get_or_create_collection(
-            name=self.COLLECTION_NAME,
+            name=self.collection_name,
             metadata={"hnsw:space": "cosine"},
         )
 
@@ -94,7 +154,7 @@ class VectorStoreService:
         from langchain_community.vectorstores import PGVector
         self._store = PGVector(
             connection_string=settings.pgvector_dsn,
-            collection_name=self.COLLECTION_NAME,
+            collection_name=self.collection_name,
             embedding_function=self.embeddings,
         )
 
@@ -157,9 +217,73 @@ class VectorStoreService:
             return len(ids)
         return 0
 
+    async def delete_by_source(self, source: str) -> int:
+        """Delete chunks by source path, tolerating relative-path variants."""
+        if self._backend != "chroma" or self._store is None:
+            return 0
+        from pathlib import Path
+
+        raw = str(source)
+        variants = {raw, raw.replace("\\", "/"), raw.replace("/", "\\")}
+        try:
+            normalized = str(Path(raw))
+            variants.add(normalized)
+            if not Path(raw).is_absolute():
+                variants.add(f"./{normalized}")
+            variants.add(str(Path(raw).resolve()))
+        except OSError:
+            pass
+        existing = self._store.get(
+            where={"source": {"$in": list(variants)}},
+            include=[],
+        )
+        ids = existing.get("ids", [])
+        if ids:
+            self._store.delete(ids=ids)
+        return len(ids)
+
+    async def count_by_source(self, source: str) -> int:
+        """Count chunks by source path, tolerating relative-path variants."""
+        if self._backend != "chroma" or self._store is None:
+            return 0
+        from pathlib import Path
+
+        raw = str(source)
+        variants = {raw, raw.replace("\\", "/"), raw.replace("/", "\\")}
+        try:
+            normalized = str(Path(raw))
+            variants.add(normalized)
+            if not Path(raw).is_absolute():
+                variants.add(f"./{normalized}")
+            variants.add(str(Path(raw).resolve()))
+        except OSError:
+            pass
+        existing = self._store.get(
+            where={"source": {"$in": list(variants)}},
+            include=[],
+        )
+        return len(existing.get("ids", []))
+
+    async def count_by_doc_id(self, doc_id: str) -> int:
+        """Return the number of indexed chunks for a document."""
+        if self._backend != "chroma" or self._store is None:
+            return 0
+        existing = self._store.get(where={"doc_id": doc_id}, include=[])
+        return len(existing.get("ids", []))
+
     async def get_stats(self) -> dict:
         """获取向量库统计信息"""
         if self._backend == "chroma":
             count = self._store.count()
-            return {"backend": "chroma", "total_vectors": count, "collection": self.COLLECTION_NAME}
-        return {"backend": "pgvector", "collection": self.COLLECTION_NAME}
+            from pathlib import Path
+
+            files = [path for path in Path(settings.upload_dir).iterdir() if path.is_file()] if Path(settings.upload_dir).exists() else []
+            return {
+                "backend": "chroma",
+                "total_vectors": count,
+                "total_chunks": count,
+                "documents": len(files),
+                "total_size": sum(path.stat().st_size for path in files),
+                "collection": self.collection_name,
+            }
+        return {"backend": "pgvector", "collection": self.collection_name}

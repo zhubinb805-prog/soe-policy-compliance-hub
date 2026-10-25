@@ -10,13 +10,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
 from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class ChangeType(str, Enum):
@@ -225,7 +229,15 @@ class KnowledgeUpdateAgent:
             result.vectors_added = len(chunks)
 
         if self.knowledge_extractor and self.knowledge_graph:
-            extractions = await self.knowledge_extractor.extract(chunks)
+            # Updating vectors must not fail only because the optional LLM
+            # extraction endpoint is slow or temporarily unavailable.
+            try:
+                extractions = await asyncio.wait_for(
+                    self.knowledge_extractor.extract(chunks), timeout=25
+                )
+            except Exception as exc:
+                logger.warning("Knowledge extraction skipped during update: %s", exc)
+                extractions = []
             for ext in extractions:
                 for ent in ext.entities:
                     version = self._bump_version(ent.name)
@@ -236,19 +248,28 @@ class KnowledgeUpdateAgent:
                     result.relations_added += 1
 
     async def _handle_modify(self, change: DocumentChange, result: UpdateResult) -> None:
-        doc_id = hashlib.sha256(change.file_path.encode()).hexdigest()[:16]
-
         if self.vector_store:
-            deleted = await self.vector_store.delete_by_doc_id(doc_id)
+            if hasattr(self.vector_store, "delete_by_source"):
+                deleted = await self.vector_store.delete_by_source(change.file_path)
+            else:
+                doc_id = hashlib.sha256(change.file_path.encode()).hexdigest()[:16]
+                deleted = await self.vector_store.delete_by_doc_id(doc_id)
             result.vectors_deleted = deleted
+
+        # Remove entities and relationships from the old version before
+        # writing the modified document, otherwise stale graph facts remain.
+        if self.knowledge_graph:
+            await self.knowledge_graph.delete_by_source(change.file_path)
 
         await self._handle_create(change, result)
 
     async def _handle_delete(self, change: DocumentChange, result: UpdateResult) -> None:
-        doc_id = hashlib.sha256(change.file_path.encode()).hexdigest()[:16]
-
         if self.vector_store:
-            deleted = await self.vector_store.delete_by_doc_id(doc_id)
+            if hasattr(self.vector_store, "delete_by_source"):
+                deleted = await self.vector_store.delete_by_source(change.file_path)
+            else:
+                doc_id = hashlib.sha256(change.file_path.encode()).hexdigest()[:16]
+                deleted = await self.vector_store.delete_by_doc_id(doc_id)
             result.vectors_deleted = deleted
 
         if self.knowledge_graph:

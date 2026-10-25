@@ -42,7 +42,7 @@
         action="#"
         :auto-upload="false"
         :on-change="handleFileSelect"
-        accept=".docx,.pdf,.txt,.md"
+        accept=".docx,.doc,.pdf,.txt,.md,.csv,.xlsx,.xls"
         :limit="1"
       >
         <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
@@ -51,7 +51,7 @@
         </div>
         <template #tip>
           <div class="el-upload__tip">
-            支持: pdf, docx, txt, md；建议包含制度编号、版本和生效日期
+            支持: pdf, docx, doc, txt, md, csv, xlsx, xls；建议包含制度编号、版本和生效日期
           </div>
         </template>
       </el-upload>

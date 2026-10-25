@@ -209,10 +209,15 @@ def _build_ingest_graph(
         chunks = await doc_parser.parse_batch(file_paths)
         return {"chunks": chunks}
 
-    @IdempotentNode("extract", max_retries=3, timeout_seconds=180)
+    @IdempotentNode("extract", max_retries=1, timeout_seconds=30)
     async def extract_knowledge(state: dict) -> dict:     # 知识提取节点
         chunks = state.get("chunks", [])
-        extractions = await extractor.extract(chunks)
+        # LLM extraction is best-effort; vector indexing must not depend on it.
+        try:
+            extractions = await asyncio.wait_for(extractor.extract(chunks), timeout=25)
+        except Exception as exc:
+            logger.warning("Knowledge extraction skipped; document remains searchable: %s", exc)
+            extractions = []
         return {"extractions": extractions}
 
     @IdempotentNode("store_vectors", max_retries=3, timeout_seconds=120)
@@ -231,12 +236,14 @@ def _build_ingest_graph(
         entity_count = 0
         if knowledge_graph:
             for ext in extractions:
+                source = sources.get(ext.source_chunk_id, "")
                 for ent in ext.entities:
                     source = sources.get(ext.source_chunk_id, "")
                     await knowledge_graph.upsert_entity(ent, source=source)    # 插入或更新实体
                     entity_count += 1
                 for rel in ext.relations:
                     await knowledge_graph.add_relation(rel, source=source)     # 添加关系
+        entity_count = sum(len(ext.entities) for ext in extractions)
         return {"entities_stored": entity_count}
 
     graph = StateGraph(IngestState)
@@ -246,9 +253,10 @@ def _build_ingest_graph(
     graph.add_node("store_graph", store_graph)     # 知识图存储节点
 
     graph.set_entry_point("parse")     # 文档解析节点作为入口
-    graph.add_edge("parse", "extract")     # 文档解析节点到知识提取节点的边
-    graph.add_edge("extract", "store_vectors")     # 知识提取节点到向量存储节点的边
-    graph.add_edge("store_vectors", "store_graph")    # 向量存储节点到知识图存储节点的边
+    # Store searchable vectors before the optional LLM extraction step.
+    graph.add_edge("parse", "store_vectors")
+    graph.add_edge("store_vectors", "extract")
+    graph.add_edge("extract", "store_graph")
     graph.add_edge("store_graph", END)     # 知识图存储节点到结束节点的边
 
     return graph.compile(checkpointer=checkpointer)
@@ -258,7 +266,10 @@ def _build_ingest_graph(
 """问答流程"""
 def _build_qa_graph(qa_agent: QAAgent, checkpointer=None) -> StateGraph:
 
-    @IdempotentNode("answer", max_retries=2, timeout_seconds=60)
+    # QA contains several model calls; retrying the whole chain can duplicate
+    # memory writes and exceed the frontend timeout. Each model call has its
+    # own bounded timeout and the agent provides a retrieval-only fallback.
+    @IdempotentNode("answer", max_retries=1, timeout_seconds=120)
     async def process_question(state: dict) -> dict:
         question = state.get("question", "")
         session_id = state.get("session_id")
